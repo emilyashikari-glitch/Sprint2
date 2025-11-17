@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOP Training & Gamification Portal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Custom styles for better aesthetics and readability */
+        :root {
+            --primary-color: #4f46e5;
+            --primary-light: #eef2ff;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--primary-light);
+            min-height: 100vh;
+        }
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+        .btn-primary:hover {
+            background-color: #4338ca;
+        }
+        .card {
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+            padding: 24px;
+        }
+        .quiz-option:hover {
+            border-color: var(--primary-color);
+        }
+        .quiz-option.selected {
+            border-color: var(--primary-color) !important;
+            background-color: var(--primary-light) !important;
+        }
+        .quiz-option.correct {
+            border-color: #10b981 !important;
+            background-color: #d1fae5 !important;
+        }
+        .quiz-option.incorrect {
+            border-color: #ef4444 !important;
+            background-color: #fee2e2 !important;
+        }
+        /* Style for required 100% score notice */
+        .passing-notice {
+            background-color: #fef3c7;
+            color: #b45309;
+            border-left: 4px solid #f59e0b;
+            padding: 12px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body class="p-6">
+
+    <div id="app" class="max-w-7xl mx-auto">
+        <!-- Content will be rendered here by JavaScript -->
+    </div>
+
+    <!-- Modal for Alerts/Messages -->
+    <div id="custom-alert" class="fixed inset-0 bg-gray-600 bg-opacity-50 z-50 hidden flex items-center justify-center">
+        <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+            <h3 class="text-xl font-bold mb-3" id="alert-title"></h3>
+            <p id="alert-message" class="text-gray-600 mb-4"></p>
+            <button onclick="document.getElementById('custom-alert').classList.add('hidden')" class="btn-primary w-full">OK</button>
+        </div>
+    </div>
+
+    <script>
+        // Global variables provided by the Canvas environment (used for persistent storage)
+        const storage = typeof window.storage !== 'undefined' ? window.storage : {
+            // Fallback for non-Canvas environments (uses localStorage)
+            get: (key) => Promise.resolve({ value: localStorage.getItem(key) }),
+            set: (key, value) => Promise.resolve(localStorage.setItem(key, value)),
+        };
+
+        // --- State Management ---
+        let isLoggedIn = false;
+        let userRole = null;
+        let currentUser = null;
+        let loginEmail = '';
+        let loginError = '';
+        let view = 'dashboard';
+        let documents = [];
+        let employees = [];
+        let selectedDoc = null;
+        let currentQuizState = {
+            docId: null,
+            quiz: null,
+            questionIndex: 0,
+            selectedAnswer: null,
+            showResult: false,
+            score: 0
+        };
+
+        let uploadingDoc = false;
+        let showAddEmployee = false;
+        let newEmployeeName = '';
+        let newEmployeeEmail = '';
+        let quizInProgress = false;
+
+        // --- Utility Functions ---
+
+        /** Shows a custom modal instead of the browser's alert() */
+        function customAlert(title, message) {
+            document.getElementById('alert-title').textContent = title;
+            document.getElementById('alert-message').textContent = message;
+            document.getElementById('custom-alert').classList.remove('hidden');
+        }
+
+        /** Saves the current state of documents and employees to persistent storage */
+        async function saveData() {
+            try {
+                await storage.set('sop-documents', JSON.stringify(documents));
+                await storage.set('sop-employees', JSON.stringify(employees));
+            } catch (error) {
+                console.error('Save error:', error);
+            }
+            render();
+        }
+
+        /** Loads data from storage on initialization */
+        async function loadData() {
+            try {
+                const docsResult = await storage.get('sop-documents');
+                const employeesResult = await storage.get('sop-employees');
+                if (docsResult && docsResult.value) {
+                    documents = JSON.parse(docsResult.value);
+                }
+                if (employeesResult && employeesResult.value) {
+                    employees = JSON.parse(employeesResult.value);
+                }
+            } catch (error) {
+                console.log('No saved data or storage unavailable. Starting fresh.');
+            }
+            // Add a default manager if needed
+            if (!employees.find(e => e.email === 'manager@company.com')) {
+                employees.push({ id: 'manager', name: 'SOP Manager', email: 'manager@company.com', points: 0, level: 0, completedTrainings: [], badges: [] });
+            }
+            render();
+        }
+
+        /** Calculate employee stats */
+        function getStats(emp) {
+            const assignedTrainings = documents.filter(doc => (doc.assignedTo || []).includes(emp.email));
+            const completed = emp.completedTrainings.length;
+            const total = assignedTrainings.length;
+
+            return {
+                completion: total > 0 ? Math.round((completed / total) * 100) : 0,
+                completed,
+                total
+            };
+        }
+
+        // --- API & Quiz Generation ---
+
+        /** Calls the Gemini API to generate a quiz from document content */
+        async function generateQuiz(content, title) {
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            
+            // Limit content to 4000 characters for token efficiency
+            const promptContent = content.substring(0, 4000);
+            
+            // Updated system prompt for stricter output
+            const systemPrompt = "You are a quiz generation bot. Create exactly 5 multiple-choice questions (4 options each) based on the provided SOP document content. The correct answer must be unambiguous. Output the result strictly as a JSON array of objects. Ensure 'correctIndex' is an integer from 0 to 3.";
+
+            const userQuery = `SOP Title: ${title}\nSOP Content: ${promptContent}\n\nGenerate 5 quiz questions.`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "ARRAY",
+                        items: {
+                            type: "OBJECT",
+                            properties: {
+                                "question": { "type": "STRING", "description": "The quiz question based on the SOP content." },
+                                "options": { "type": "ARRAY", "items": { "type": "STRING" }, "description": "Exactly four answer options." },
+                                "correctIndex": { "type": "INTEGER", "description": "The index (0-3) of the correct answer in the options array. Must be an integer." }
+                            },
+                            required: ["question", "options", "correctIndex"]
+                        }
+                    }
+                }
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                
+                let jsonText = data.candidates[0].content.parts[0].text.trim();
+                
+                // FIX 1: Remove leading/trailing Markdown code fences (```json or ```) if present
+                if (jsonText.startsWith('```')) {
+                    jsonText = jsonText.replace(/^```json\s*|```\s*$/g, '');
+                }
+
+                let quizArray = JSON.parse(jsonText);
+                
+                // FIX 2 & 3: Robust validation and sanitization of the generated quiz
+                const validatedQuestions = [];
+                let validationFailed = false;
+
+                if (!Array.isArray(quizArray)) {
+                    console.error("API response was not a JSON array.");
+                    validationFailed = true;
+                } else {
+                    for (const q of quizArray) {
+                        const isQuestionValid = typeof q.question === 'string' && q.question.trim().length > 0;
+                        const isOptionsValid = Array.isArray(q.options) && q.options.length === 4 && q.options.every(opt => typeof opt === 'string');
+                        
+                        // Ensure correctIndex is a number between 0 and 3
+                        const correctIndex = parseInt(q.correctIndex);
+                        const isIndexValid = !isNaN(correctIndex) && correctIndex >= 0 && correctIndex <= 3;
+                        
+                        if (isQuestionValid && isOptionsValid && isIndexValid) {
+                            // Sanitize the index just in case it was a string
+                            q.correctIndex = correctIndex;
+                            validatedQuestions.push(q);
+                        } else {
+                            console.warn("Invalid question dropped during validation:", q);
+                            validationFailed = true;
+                        }
+                    }
+                }
+                
+                // Must have at least 3 valid questions to proceed
+                if (validatedQuestions.length < 3) {
+                    customAlert('Quiz Error', 'Quiz generation failed validation (too few valid questions generated). Try uploading simpler text.');
+                    return null;
+                }
+
+                console.log(`Quiz generated and validated. ${validatedQuestions.length} questions remaining.`);
+                return { questions: validatedQuestions };
+
+            } catch (error) {
+                console.error('Quiz generation failed:', error);
+                customAlert('Quiz Error', 'Failed to generate quiz from SOP. Please check console for details.');
+                return null;
+            }
+        }
+
+        /** Extracts text from PDF using the Gemini API */
+        async function extractTextFromPDF(base64Data, title) {
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+            const systemPrompt = "You are an expert document parser. Your task is to extract all the textual content from the provided PDF document and return it as a single, clean text block. Do not add any commentary or extra formatting.";
+            
+            const payload = {
+                contents: [
+                    {
+                        role: "user",
+                        parts: [
+                            { text: `Extract all text from the SOP titled: ${title}` },
+                            {
+                                inlineData: {
+                                    mimeType: "application/pdf",
+                                    data: base64Data
+                                }
+                            }
+                        ]
+                    }
+                ],
+                systemInstruction: { parts: [{ text: systemPrompt }] }
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                return data.candidates[0].content.parts[0].text;
+            } catch (error) {
+                console.error('PDF extraction failed:', error);
+                customAlert('Extraction Error', 'Failed to extract text from PDF. Check console for API error.');
+                return null;
+            }
+        }
+
+        // --- Manager Actions ---
+
+        function handleLogin() {
+            loginError = '';
+            const email = loginEmail.trim().toLowerCase();
+            if (!email) {
+                loginError = 'Please enter email';
+            } else if (email === 'manager@company.com') {
+                isLoggedIn = true;
+                userRole = 'manager';
+                currentUser = employees.find(e => e.email === email);
+            } else {
+                const employee = employees.find(e => e.email.toLowerCase() === email);
+                if (employee) {
+                    isLoggedIn = true;
+                    userRole = 'employee';
+                    currentUser = employee;
+                } else {
+                    loginError = 'Email not found. Only existing employees or the manager can log in.';
+                }
+            }
+            render();
+        }
+
+        function handleLogout() {
+            isLoggedIn = false;
+            userRole = null;
+            currentUser = null;
+            loginEmail = '';
+            view = 'dashboard';
+            render();
+        }
+
+        async function handleFileUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            uploadingDoc = true;
+            render();
+
+            let text = '';
+            try {
+                if (file.type === 'application/pdf') {
+                    const base64 = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result.split(',')[1]);
+                        reader.onerror = () => reject(new Error('Read failed'));
+                        reader.readAsDataURL(file);
+                    });
+                    text = await extractTextFromPDF(base64, file.name);
+                } else {
+                    text = await file.text();
+                }
+
+                if (!text) throw new Error('Could not extract text from file.');
+
+                const quiz = await generateQuiz(text, file.name);
+                
+                const newDoc = {
+                    id: Date.now().toString(),
+                    title: file.name.replace(/\.(pdf|txt|md)$/i, ''),
+                    content: text,
+                    uploadDate: new Date().toISOString(),
+                    quiz: quiz,
+                    assignedTo: [], // Manager must assign it
+                };
+
+                documents = [...documents, newDoc];
+                await saveData();
+                customAlert('Upload Complete', `Document "${newDoc.title}" uploaded and quiz generated successfully. It must now be assigned to employees.`);
+
+            } catch (error) {
+                console.error('Upload process failed:', error);
+                customAlert('Upload Failed', 'There was an error uploading the file or generating the quiz.');
+            } finally {
+                uploadingDoc = false;
+                render();
+            }
+        }
+
+        function addEmployee() {
+            const name = newEmployeeName.trim();
+            const email = newEmployeeEmail.trim().toLowerCase();
+            
+            if (!name || !email || !email.includes('@') || !email.includes('.')) {
+                customAlert('Input Error', 'Please enter a valid name and email address.');
+                return;
+            }
+            
+            if (employees.find(e => e.email.toLowerCase() === email)) {
+                customAlert('Error', 'An employee with this email already exists.');
+                return;
+            }
+            
+            const newEmp = {
+                id: crypto.randomUUID(),
+                name: name,
+                email: email,
+                points: 0,
+                level: 1,
+                completedTrainings: [],
+                badges: []
+            };
+            
+            employees = [...employees, newEmp];
+            saveData();
+            
+            customAlert('Success', `Employee ${name} added successfully! They can now log in.`);
+            newEmployeeName = '';
+            newEmployeeEmail = '';
+            showAddEmployee = false;
+            render();
+        }
+
+        function assignTraining(docId, employeeEmail) {
+            const doc = documents.find(d => d.id === docId);
+            if (!doc) return;
+
+            const employee = employees.find(e => e.email === employeeEmail);
+            if (!employee) return;
+            
+            // Manager cannot assign training to themselves (the manager account is special)
+            if (employee.email === 'manager@company.com') {
+                customAlert('Assignment Failed', 'Cannot assign training to the Manager account.');
+                return;
+            }
+
+            if (!doc.assignedTo.includes(employeeEmail)) {
+                doc.assignedTo.push(employeeEmail);
+            } else {
+                doc.assignedTo = doc.assignedTo.filter(e => e !== employeeEmail);
+            }
+            documents = documents.map(d => d.id === docId ? doc : d);
+            saveData();
+            render();
+        }
+
+        // --- Employee / Quiz Actions ---
+
+        function startQuiz(docId) {
+            const doc = documents.find(d => d.id === docId);
+            if (!doc || !doc.quiz || doc.quiz.questions.length === 0) {
+                customAlert('No Quiz', 'This SOP is currently missing a quiz.');
+                return;
+            }
+            selectedDoc = doc;
+            currentQuizState = {
+                docId: doc.id,
+                quiz: doc.quiz,
+                questionIndex: 0,
+                selectedAnswer: null,
+                showResult: false,
+                score: 0
+            };
+            quizInProgress = true;
+            render();
+        }
+
+        function handleSelectAnswer(index) {
+            if (!currentQuizState.showResult) {
+                currentQuizState.selectedAnswer = index;
+                render();
+            }
+        }
+
+        function submitAnswer() {
+            if (currentQuizState.selectedAnswer === null) return;
+            
+            // FIX: Ensure correctIndex is an integer during comparison for safety
+            const correctIndex = parseInt(currentQuizState.quiz.questions[currentQuizState.questionIndex].correctIndex);
+            
+            const correct = currentQuizState.selectedAnswer === correctIndex;
+            
+            if (correct) {
+                currentQuizState.score += 1;
+            }
+            currentQuizState.showResult = true;
+            render();
+        }
+
+        function nextQuestion() {
+            if (currentQuizState.questionIndex < currentQuizState.quiz.questions.length - 1) {
+                currentQuizState.questionIndex += 1;
+                currentQuizState.selectedAnswer = null;
+                currentQuizState.showResult = false;
+                render();
+            } else {
+                completeTraining();
+            }
+        }
+
+        function completeTraining() {
+            const total = currentQuizState.quiz.questions.length;
+            const percentage = (currentQuizState.score / total) * 100;
+            
+            // MANDATORY 100% PASSING RULE
+            const passed = percentage === 100;
+            
+            let pointsAwarded = 0;
+            if (passed) {
+                pointsAwarded = total * 10;
+                // Only add to completed trainings if it's the first time passing this SOP
+                if (!currentUser.completedTrainings.includes(selectedDoc.id)) {
+                     currentUser.completedTrainings.push(selectedDoc.id);
+                }
+            }
+            
+            // Update points and level
+            currentUser.points += pointsAwarded;
+            currentUser.level = Math.floor(currentUser.points / 100) + 1;
+            
+            // Update badges (simple logic based on number of completions)
+            const completedCount = currentUser.completedTrainings.length;
+            if (completedCount >= 5 && !currentUser.badges.includes('bronze')) currentUser.badges.push('bronze');
+            if (completedCount >= 10 && !currentUser.badges.includes('silver')) currentUser.badges.push('silver');
+            if (completedCount >= 20 && !currentUser.badges.includes('gold')) currentUser.badges.push('gold');
+
+            employees = employees.map(e => e.id === currentUser.id ? currentUser : e);
+            saveData();
+            
+            let resultMessage = `Quiz Score: ${currentQuizState.score}/${total} (${percentage}%)\n\n`;
+            if (passed) {
+                resultMessage += `🎉 PERFECT SCORE! You passed and earned +${pointsAwarded} points!`;
+            } else {
+                resultMessage += `❌ FAILED. You must achieve a 100% score to pass this training. You earned 0 points.`;
+            }
+            
+            customAlert('Training Complete', resultMessage);
+            quizInProgress = false;
+            view = 'dashboard';
+            render();
+        }
+
+        // --- Rendering Functions ---
+
+        function renderLogin() {
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
+                    <div class="card max-w-md w-full p-8">
+                        <div class="text-center mb-8">
+                            <i data-lucide="brain" class="mx-auto text-indigo-600 mb-4" style="width: 48px; height: 48px;"></i>
+                            <h1 class="text-3xl font-bold text-gray-800">SOP Training Portal</h1>
+                            <p class="text-gray-600 mt-2">Sign in to access training or management tools</p>
+                        </div>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                                <input
+                                    type="email"
+                                    id="login-email"
+                                    value="${loginEmail}"
+                                    placeholder="manager@company.com or employee@company.com"
+                                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                            </div>
+                            ${loginError ? `<div class="p-3 bg-red-100 border border-red-300 rounded-lg text-red-700 text-sm">${loginError}</div>` : ''}
+                            <button id="login-button" class="btn-primary w-full">Sign In</button>
+                            <div class="mt-6 pt-6 border-t border-gray-200">
+                                <p class="text-sm text-gray-600 text-center">
+                                    <span class="font-semibold">Manager Login:</span> manager@company.com
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            // Add event listeners
+            document.getElementById('login-email').addEventListener('input', (e) => { loginEmail = e.target.value; });
+            document.getElementById('login-email').addEventListener('keypress', (e) => { if (e.key === 'Enter') handleLogin(); });
+            document.getElementById('login-button').addEventListener('click', handleLogin);
+            lucide.createIcons();
+        }
+
+        function renderQuiz() {
+            const { quiz, questionIndex, selectedAnswer, showResult, score } = currentQuizState;
+            // DEFENSIVE FIX: Ensure question and its properties are valid objects/arrays
+            const rawQuestion = quiz.questions[questionIndex];
+            const question = {
+                question: rawQuestion.question || 'Error: Question missing.',
+                options: Array.isArray(rawQuestion.options) ? rawQuestion.options : ['Error: Options missing or invalid.'],
+                correctIndex: rawQuestion.correctIndex
+            };
+
+            const app = document.getElementById('app');
+
+            app.innerHTML = `
+                <div class="max-w-3xl mx-auto p-6">
+                    <div class="card p-8">
+                        <div class="passing-notice mb-6">
+                            🚨 **Mandatory:** A 100% score is required to pass this training and earn points.
+                        </div>
+                        <div class="flex justify-between items-center mb-6 border-b pb-4">
+                            <h2 class="text-2xl font-bold text-gray-800">${selectedDoc.title} Quiz</h2>
+                            <div class="flex items-center gap-2 text-indigo-600 font-semibold">
+                                <i data-lucide="trophy" style="width: 24px; height: 24px;"></i>
+                                Current Score: ${score}
+                            </div>
+                        </div>
+                        
+                        <div class="mb-8">
+                            <h3 class="text-xl font-medium mb-3">Question ${questionIndex + 1} of ${quiz.questions.length}</h3>
+                            <div class="w-full bg-gray-200 rounded-full h-2">
+                                <div class="bg-indigo-600 h-2 rounded-full" style="width: ${((questionIndex + 1) / quiz.questions.length * 100)}%;"></div>
+                            </div>
+                        </div>
+
+                        <div class="bg-gray-100 rounded-lg p-6 mb-6">
+                            <p class="text-lg font-semibold">${question.question}</p>
+                        </div>
+                        
+                        <div class="space-y-3 mb-6" id="quiz-options">
+                            ${question.options.map((opt, idx) => {
+                                let className = 'w-full p-4 rounded-lg border-2 text-left quiz-option transition duration-150';
+                                if (showResult) {
+                                    if (idx === question.correctIndex) {
+                                        className += ' correct bg-green-50 border-green-500';
+                                    } else if (idx === selectedAnswer) {
+                                        className += ' incorrect bg-red-50 border-red-500';
+                                    } else {
+                                        className += ' border-gray-200 bg-white opacity-50 cursor-not-allowed';
+                                    }
+                                } else {
+                                    className += (selectedAnswer === idx ? ' selected border-indigo-500 bg-indigo-50' : ' border-gray-300 bg-white hover:bg-gray-50');
+                                }
+
+                                return `
+                                    <button
+                                        data-index="${idx}"
+                                        ${showResult ? 'disabled' : ''}
+                                        class="${className}"
+                                    >
+                                        <div class="flex items-center justify-between">
+                                            <span>${String.fromCharCode(65 + idx)}. ${opt}</span>
+                                            ${showResult && idx === question.correctIndex ? `<i data-lucide="check-circle" class="text-green-600"></i>` : ''}
+                                            ${showResult && idx === selectedAnswer && idx !== question.correctIndex ? `<i data-lucide="x-circle" class="text-red-600"></i>` : ''}
+                                        </div>
+                                    </button>
+                                `;
+                            }).join('')}
+                        </div>
+                        
+                        ${showResult ? `
+                            <button id="next-question-btn" class="btn-primary w-full mt-4">
+                                ${questionIndex < quiz.questions.length - 1 ? 'Next Question' : 'Complete Training'}
+                            </button>
+                        ` : `
+                            <button id="submit-answer-btn" class="btn-primary w-full mt-4 disabled:bg-gray-400" ${selectedAnswer === null ? 'disabled' : ''}>
+                                Submit Answer
+                            </button>
+                        `}
+                        <button onclick="quizInProgress=false; view='dashboard'; render();" class="w-full text-center mt-3 text-sm text-gray-500 hover:text-indigo-600">
+                            Exit Quiz (Progress will not be saved)
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            // Add event listeners
+            document.getElementById('quiz-options').querySelectorAll('button').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    if (!showResult) handleSelectAnswer(parseInt(e.currentTarget.dataset.index));
+                });
+            });
+
+            if (showResult) {
+                document.getElementById('next-question-btn').addEventListener('click', nextQuestion);
+            } else {
+                const submitBtn = document.getElementById('submit-answer-btn');
+                if (submitBtn) submitBtn.addEventListener('click', submitAnswer);
+            }
+
+            lucide.createIcons();
+        }
+
+        function renderMainApp() {
+            const app = document.getElementById('app');
+            let content = '';
+
+            // --- Header ---
+            content += `
+                <header class="card p-6 mb-6">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h1 class="text-3xl font-bold flex items-center gap-3">
+                                <i data-lucide="brain" class="text-indigo-600" style="width: 36px; height: 36px;"></i>
+                                SOP Training Platform
+                            </h1>
+                            <p class="text-gray-600 mt-2">${userRole === 'manager' ? 'Manager Dashboard' : 'Welcome, ' + currentUser.name}</p>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <span class="text-sm font-medium text-gray-700">${currentUser.email}</span>
+                            <button id="logout-button" class="flex items-center gap-2 px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">
+                                <i data-lucide="log-out" style="width: 20px; height: 20px;"></i>
+                                Logout
+                            </button>
+                        </div>
+                    </div>
+                </header>
+
+                <div class="flex gap-4 mb-6">
+                    <button data-view="dashboard" class="nav-btn px-6 py-3 rounded-lg font-semibold flex items-center gap-2 ${view === 'dashboard' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'}">
+                        <i data-lucide="target" style="width: 20px; height: 20px;"></i>Dashboard
+                    </button>
+                    ${userRole === 'manager' ? `
+                        <button data-view="documents" class="nav-btn px-6 py-3 rounded-lg font-semibold flex items-center gap-2 ${view === 'documents' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'}">
+                            <i data-lucide="file-text" style="width: 20px; height: 20px;"></i>SOPs & Assignment
+                        </button>
+                        <button data-view="employees" class="nav-btn px-6 py-3 rounded-lg font-semibold flex items-center gap-2 ${view === 'employees' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'}">
+                            <i data-lucide="users" style="width: 20px; height: 20px;"></i>Employees & Scores
+                        </button>
+                    ` : ''}
+                </div>
+            `;
+            
+            // --- Dashboard (Manager) ---
+            if (view === 'dashboard' && userRole === 'manager') {
+                const totalAssigned = employees.filter(e => e.email !== 'manager@company.com').reduce((sum, e) => sum + getStats(e).total, 0);
+                const totalCompleted = employees.filter(e => e.email !== 'manager@company.com').reduce((sum, e) => sum + getStats(e).completed, 0);
+                const completionRate = totalAssigned > 0 ? Math.round((totalCompleted / totalAssigned) * 100) : 0;
+
+                content += `
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="card p-6 border-l-4 border-indigo-600">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-lg font-semibold text-gray-700">Total SOPs</h3>
+                                <i data-lucide="file-text" class="text-indigo-600" style="width: 32px; height: 32px;"></i>
+                            </div>
+                            <p class="text-4xl font-bold text-indigo-600">${documents.length}</p>
+                        </div>
+                        <div class="card p-6 border-l-4 border-green-600">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-lg font-semibold text-gray-700">Employees</h3>
+                                <i data-lucide="users" class="text-green-600" style="width: 32px; height: 32px;"></i>
+                            </div>
+                            <p class="text-4xl font-bold text-green-600">${employees.length - 1}</p>
+                        </div>
+                        <div class="card p-6 border-l-4 border-yellow-600">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-lg font-semibold text-gray-700">Avg Completion Rate</h3>
+                                <i data-lucide="award" class="text-yellow-600" style="width: 32px; height: 32px;"></i>
+                            </div>
+                            <p class="text-4xl font-bold text-yellow-600">${completionRate}%</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // --- Dashboard (Employee) ---
+            if (view === 'dashboard' && userRole === 'employee') {
+                const stats = getStats(currentUser);
+                const assignedDocs = documents.filter(doc => (doc.assignedTo || []).includes(currentUser.email));
+
+                content += `
+                    <div class="space-y-6">
+                        <div class="card p-6 border-t-4 border-indigo-600">
+                            <div class="flex justify-between items-center mb-4">
+                                <div>
+                                    <h2 class="text-2xl font-bold text-gray-800">${currentUser.name}</h2>
+                                    <p class="text-gray-600">${currentUser.email}</p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-4xl font-bold text-indigo-600">${stats.completion}%</p>
+                                    <p class="text-sm text-gray-600">SOPs Completed: ${stats.completed} / ${stats.total}</p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-6 mb-4 pt-4 border-t border-gray-100">
+                                <span class="flex items-center gap-1 text-yellow-600 font-semibold"><i data-lucide="star" style="width: 18px; height: 18px;"></i>Level ${currentUser.level}</span>
+                                <span class="flex items-center gap-1 text-green-600 font-semibold"><i data-lucide="trophy" style="width: 18px; height: 18px;"></i>${currentUser.points} Points</span>
+                                ${currentUser.badges.length > 0 ? `<div class="flex gap-2">${currentUser.badges.map(b => `<i data-lucide="award" class="text-orange-600" title="${b.charAt(0).toUpperCase() + b.slice(1)} Badge"></i>`).join('')}</div>` : ''}
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-3">
+                                <div class="bg-indigo-600 h-3 rounded-full transition-all duration-500" style="width: ${stats.completion}%"></div>
+                            </div>
+                        </div>
+
+                        <div class="card p-6">
+                            <h3 class="text-xl font-bold mb-4">Assigned Training (SOPs)</h3>
+                            ${stats.total === 0 ? `<p class="text-gray-500 text-center py-8">No training assigned yet. Ask your manager to assign SOPs.</p>` : `
+                                <div class="space-y-3">
+                                    ${assignedDocs.map(doc => {
+                                        const done = currentUser.completedTrainings.includes(doc.id);
+                                        return `
+                                            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-lg border-2 ${done ? 'border-green-300' : 'border-gray-200'}">
+                                                <div class="flex items-center gap-3">
+                                                    <i data-lucide="${done ? 'check-circle' : 'book-open'}" class="${done ? 'text-green-600' : 'text-indigo-600'}" style="width: 24px; height: 24px;"></i>
+                                                    <div>
+                                                        <h4 class="font-semibold text-gray-800">${doc.title}</h4>
+                                                        <p class="text-sm text-gray-500">${doc.quiz ? doc.quiz.questions.length + ' questions' : 'No quiz generated'}</p>
+                                                    </div>
+                                                </div>
+                                                ${doc.quiz ? `
+                                                    <button onclick="startQuiz('${doc.id}')" class="btn-primary px-4 py-2 text-sm">
+                                                        ${done ? 'Retake Quiz' : 'Start Training'}
+                                                    </button>
+                                                ` : `<span class="text-red-500 text-sm">Quiz Missing</span>`}
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // --- SOPs & Assignment (Manager) ---
+            if (view === 'documents' && userRole === 'manager') {
+                content += `
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        
+                        <!-- Upload Card -->
+                        <div class="card p-6 lg:col-span-1">
+                            <h2 class="text-xl font-bold mb-4">Upload New SOP</h2>
+                            <label class="cursor-pointer block">
+                                <div class="border-2 border-dashed ${uploadingDoc ? 'border-gray-400' : 'border-indigo-300 hover:border-indigo-500'} rounded-lg p-8 text-center transition duration-200">
+                                    <i data-lucide="upload" class="mx-auto mb-2 ${uploadingDoc ? 'text-gray-400' : 'text-indigo-600'}" style="width: 32px; height: 32px;"></i>
+                                    <p class="font-semibold">${uploadingDoc ? 'Processing...' : 'Click to Upload PDF or Text'}</p>
+                                    <p class="text-sm text-gray-500 mt-1">Quiz auto-generated by AI.</p>
+                                </div>
+                                <input type="file" id="file-upload" accept=".pdf,.txt" onchange="handleFileUpload(event)" class="hidden" ${uploadingDoc ? 'disabled' : ''} />
+                            </label>
+                            ${uploadingDoc ? `<div class="mt-4 text-center text-indigo-600 font-medium">Please wait, generating quiz...</div>` : ''}
+                        </div>
+
+                        <!-- Document List and Assignment -->
+                        <div class="card p-6 lg:col-span-2">
+                            <h2 class="text-xl font-bold mb-4">SOPs List & Assignment</h2>
+                            ${documents.length === 0 ? `<p class="text-gray-500 text-center py-8">No SOPs uploaded yet.</p>` : `
+                                <div class="space-y-4">
+                                    ${documents.filter(d => d.id !== 'manager').map(doc => `
+                                        <div class="border rounded-lg p-4 bg-gray-50">
+                                            <div class="flex items-center justify-between mb-3">
+                                                <div class="flex items-center gap-3">
+                                                    <i data-lucide="book-open" class="text-indigo-600" style="width: 20px; height: 20px;"></i>
+                                                    <h3 class="font-bold text-lg">${doc.title}</h3>
+                                                </div>
+                                                <span class="text-sm text-gray-500">${doc.quiz ? doc.quiz.questions.length + ' Questions' : 'Quiz Failed'}</span>
+                                            </div>
+                                            <div class="border-t pt-3">
+                                                <p class="font-medium mb-2 text-gray-700">Assigned Employees (${doc.assignedTo.length}):</p>
+                                                <div class="flex flex-wrap gap-2" id="assignment-list-${doc.id}">
+                                                    ${employees.filter(e => e.email !== 'manager@company.com').map(emp => `
+                                                        <button 
+                                                            onclick="assignTraining('${doc.id}', '${emp.email}')"
+                                                            class="text-xs font-semibold px-3 py-1 rounded-full transition-colors duration-150 ${doc.assignedTo.includes(emp.email) ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}"
+                                                        >
+                                                            ${emp.name}
+                                                        </button>
+                                                    `).join('')}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // --- Employees & Scores (Manager) ---
+            if (view === 'employees' && userRole === 'manager') {
+                const employeeList = employees.filter(e => e.email !== 'manager@company.com');
+                content += `
+                    <div class="card p-6">
+                        <div class="flex justify-between mb-6">
+                            <h2 class="text-xl font-bold">Employee Roster (${employeeList.length})</h2>
+                            <button id="add-employee-btn" class="btn-primary text-sm">+ Add Employee</button>
+                        </div>
+                        
+                        ${showAddEmployee ? `
+                            <div class="mb-6 p-5 bg-indigo-50 rounded-xl border border-indigo-200">
+                                <h3 class="font-bold text-lg mb-3">Add New Employee</h3>
+                                <div class="space-y-3">
+                                    <input type="text" id="new-emp-name" value="${newEmployeeName}" placeholder="Full Name" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                                    <input type="email" id="new-emp-email" value="${newEmployeeEmail}" placeholder="Email Address (e.g., john@company.com)" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                                    <div class="flex gap-3">
+                                        <button id="add-employee-submit" class="flex-1 bg-green-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-green-700">Add Employee</button>
+                                        <button id="cancel-add-employee" class="flex-1 bg-gray-400 text-white px-4 py-2 rounded-lg font-semibold hover:bg-gray-500">Cancel</button>
+                                    </div>
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        ${employeeList.length === 0 ? `<p class="text-gray-500 text-center py-8">No employees in the system. Use the button above to add one.</p>` : `
+                            <div class="space-y-4">
+                                ${employeeList.sort((a, b) => b.points - a.points).map((emp, index) => {
+                                    const stats = getStats(emp);
+                                    return `
+                                        <div class="border rounded-xl p-6 transition-shadow hover:shadow-lg ${index === 0 ? 'bg-yellow-50 border-yellow-400' : 'bg-white border-gray-200'}">
+                                            <div class="flex justify-between items-start mb-4">
+                                                <div class="flex items-center gap-4">
+                                                    <span class="text-2xl font-extrabold text-indigo-600">${index + 1}.</span>
+                                                    <div>
+                                                        <h3 class="text-xl font-bold">${emp.name}</h3>
+                                                        <p class="text-gray-600 text-sm">${emp.email}</p>
+                                                    </div>
+                                                </div>
+                                                <div class="text-right">
+                                                    <p class="text-3xl font-bold text-green-600 flex items-center gap-1">
+                                                        <i data-lucide="trophy" style="width: 24px; height: 24px;"></i>${emp.points}
+                                                    </p>
+                                                    <p class="text-sm text-yellow-600 font-semibold flex items-center justify-end gap-1">
+                                                        <i data-lucide="star" style="width: 16px; height: 16px;"></i>Level ${emp.level}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="pt-4 border-t border-gray-100">
+                                                <div class="flex justify-between text-sm text-gray-700 font-medium mb-1">
+                                                    <span>Completion: ${stats.completed}/${stats.total} SOPs</span>
+                                                    <span>${stats.completion}%</span>
+                                                </div>
+                                                <div class="w-full bg-gray-200 rounded-full h-2">
+                                                    <div class="bg-indigo-600 h-2 rounded-full" style="width: ${stats.completion}%;"></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        `}
+                    </div>
+                `;
+            }
+
+
+            app.innerHTML = content;
+
+            // Global event listeners (after content is inserted)
+            const logoutBtn = document.getElementById('logout-button');
+            if (logoutBtn) logoutBtn.addEventListener('click', handleLogout);
+            
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    view = e.currentTarget.dataset.view;
+                    render();
+                });
+            });
+
+            // --- Employee View Event Listeners (Must be conditional and after DOM update) ---
+            if (view === 'employees' && userRole === 'manager') {
+                const addEmployeeBtn = document.getElementById('add-employee-btn');
+
+                if (!showAddEmployee) {
+                    // Attach listener to the main '+' Add Employee button
+                    if (addEmployeeBtn) {
+                        addEmployeeBtn.addEventListener('click', () => { showAddEmployee = true; render(); });
+                    }
+                } else {
+                    // Attach listeners for the form elements
+                    const newEmpNameInput = document.getElementById('new-emp-name');
+                    const newEmpEmailInput = document.getElementById('new-emp-email');
+                    const submitBtn = document.getElementById('add-employee-submit');
+                    const cancelBtn = document.getElementById('cancel-add-employee');
+
+                    if (newEmpNameInput) newEmpNameInput.addEventListener('input', (e) => { newEmployeeName = e.target.value; });
+                    if (newEmpEmailInput) newEmpEmailInput.addEventListener('input', (e) => { newEmployeeEmail = e.target.value; });
+                    if (submitBtn) submitBtn.addEventListener('click', addEmployee);
+                    if (cancelBtn) cancelBtn.addEventListener('click', () => { showAddEmployee = false; newEmployeeName = ''; newEmployeeEmail = ''; render(); });
+                }
+            }
+            
+
+            // Re-render Lucide icons
+            lucide.createIcons();
+        }
+
+        /** Main Render Loop */
+        function render() {
+            if (quizInProgress) {
+                renderQuiz();
+            } else if (isLoggedIn) {
+                renderMainApp();
+            } else {
+                renderLogin();
+            }
+        }
+
+        // Initialize App
+        window.onload = loadData;
+    </script>
+</body>
+</html>
