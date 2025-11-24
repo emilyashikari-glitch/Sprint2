@@ -75,13 +75,63 @@
         </div>
     </div>
 
+    <!-- Modal for API Key Configuration -->
+    <div id="api-key-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden flex items-center justify-center">
+        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full">
+            <h3 class="text-2xl font-bold mb-4 flex items-center gap-2">
+                <i data-lucide="key" class="text-indigo-600"></i> API Key Setup
+            </h3>
+            <p class="text-gray-600 mb-4">
+                To generate quizzes and read PDFs, this app requires a Google Gemini API Key.
+            </p>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Enter Gemini API Key</label>
+                <input type="password" id="api-key-input" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none" placeholder="AIzaSy..." />
+                <p class="text-xs text-gray-500 mt-2">
+                    Key is stored locally in your browser. Get one at <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-indigo-600 underline">Google AI Studio</a>.
+                </p>
+            </div>
+            <div class="flex justify-end gap-3">
+                <button onclick="document.getElementById('api-key-modal').classList.add('hidden')" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Cancel</button>
+                <button onclick="saveApiKey()" class="btn-primary">Save Key</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Global variables provided by the Canvas environment (used for persistent storage)
-        const storage = typeof window.storage !== 'undefined' ? window.storage : {
+        var storage = typeof window.storage !== 'undefined' ? window.storage : {
             // Fallback for non-Canvas environments (uses localStorage)
             get: (key) => Promise.resolve({ value: localStorage.getItem(key) }),
             set: (key, value) => Promise.resolve(localStorage.setItem(key, value)),
         };
+
+        // --- API Key Management ---
+        function getApiKey() {
+            return localStorage.getItem('sop_gemini_api_key') || "";
+        }
+
+        function saveApiKey() {
+            const input = document.getElementById('api-key-input');
+            const key = input.value.trim();
+            if (key) {
+                localStorage.setItem('sop_gemini_api_key', key);
+                document.getElementById('api-key-modal').classList.add('hidden');
+                customAlert("Success", "API Key saved! You can now upload documents.");
+            } else {
+                alert("Please enter a valid API Key.");
+            }
+        }
+
+        function showApiKeyModal() {
+            const currentKey = getApiKey();
+            if (currentKey) {
+                document.getElementById('api-key-input').value = currentKey;
+            }
+            document.getElementById('api-key-modal').classList.remove('hidden');
+            // Re-initialize icons for the modal
+            lucide.createIcons();
+        }
 
         // --- State Management ---
         let isLoggedIn = false;
@@ -166,7 +216,12 @@
 
         /** Calls the Gemini API to generate a quiz from document content */
         async function generateQuiz(content, title) {
-            const apiKey = "";
+            const apiKey = getApiKey();
+            if (!apiKey) {
+                // Should be caught earlier, but defensive check
+                return null;
+            }
+
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
             
             // Limit content to 4000 characters for token efficiency
@@ -177,10 +232,11 @@
 
             const userQuery = `SOP Title: ${title}\nSOP Content: ${promptContent}\n\nGenerate 5 quiz questions.`;
 
+            // FIX: Changed 'config' to 'generationConfig' to match API requirements
             const payload = {
                 contents: [{ parts: [{ text: userQuery }] }],
                 systemInstruction: { parts: [{ text: systemPrompt }] },
-                config: {
+                generationConfig: {
                     responseMimeType: "application/json",
                     responseSchema: {
                         type: "ARRAY",
@@ -203,45 +259,53 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorText}`);
+                }
+
                 const data = await response.json();
                 
+                if (!data.candidates || !data.candidates[0].content) {
+                    throw new Error("Invalid API response structure.");
+                }
+
                 let jsonText = data.candidates[0].content.parts[0].text.trim();
                 
-                // FIX 1: Remove leading/trailing Markdown code fences (```json or ```) if present
                 if (jsonText.startsWith('```')) {
                     jsonText = jsonText.replace(/^```json\s*|```\s*$/g, '');
                 }
 
-                let quizArray = JSON.parse(jsonText);
+                let quizArray;
+                try {
+                    quizArray = JSON.parse(jsonText);
+                } catch (e) {
+                    console.error("JSON Parse Error:", e, jsonText);
+                    throw new Error("Failed to parse quiz JSON.");
+                }
                 
-                // FIX 2 & 3: Robust validation and sanitization of the generated quiz
                 const validatedQuestions = [];
-                let validationFailed = false;
 
                 if (!Array.isArray(quizArray)) {
                     console.error("API response was not a JSON array.");
-                    validationFailed = true;
                 } else {
                     for (const q of quizArray) {
                         const isQuestionValid = typeof q.question === 'string' && q.question.trim().length > 0;
                         const isOptionsValid = Array.isArray(q.options) && q.options.length === 4 && q.options.every(opt => typeof opt === 'string');
                         
-                        // Ensure correctIndex is a number between 0 and 3
                         const correctIndex = parseInt(q.correctIndex);
                         const isIndexValid = !isNaN(correctIndex) && correctIndex >= 0 && correctIndex <= 3;
                         
                         if (isQuestionValid && isOptionsValid && isIndexValid) {
-                            // Sanitize the index just in case it was a string
                             q.correctIndex = correctIndex;
                             validatedQuestions.push(q);
                         } else {
                             console.warn("Invalid question dropped during validation:", q);
-                            validationFailed = true;
                         }
                     }
                 }
                 
-                // Must have at least 3 valid questions to proceed
                 if (validatedQuestions.length < 3) {
                     customAlert('Quiz Error', 'Quiz generation failed validation (too few valid questions generated). Try uploading simpler text.');
                     return null;
@@ -252,14 +316,20 @@
 
             } catch (error) {
                 console.error('Quiz generation failed:', error);
-                customAlert('Quiz Error', 'Failed to generate quiz from SOP. Please check console for details.');
+                if (error.message.includes('503')) {
+                    customAlert('Service Unavailable', 'The AI service is currently overloaded (Error 503). Please wait a moment and try uploading again.');
+                } else {
+                    customAlert('Quiz Error', 'Failed to generate quiz. ' + error.message);
+                }
                 return null;
             }
         }
 
         /** Extracts text from PDF using the Gemini API */
         async function extractTextFromPDF(base64Data, title) {
-            const apiKey = "";
+            const apiKey = getApiKey();
+            if (!apiKey) return null;
+
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 
             const systemPrompt = "You are an expert document parser. Your task is to extract all the textual content from the provided PDF document and return it as a single, clean text block. Do not add any commentary or extra formatting.";
@@ -288,12 +358,25 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorText}`);
+                }
+
                 const data = await response.json();
-                return data.candidates[0].content.parts[0].text;
+                
+                if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
+                    return data.candidates[0].content.parts[0].text;
+                } else {
+                    console.error("Unexpected API response:", data);
+                    throw new Error("Invalid API response structure.");
+                }
+
             } catch (error) {
                 console.error('PDF extraction failed:', error);
-                customAlert('Extraction Error', 'Failed to extract text from PDF. Check console for API error.');
-                return null;
+                // Pass the error message up to be handled by handleFileUpload
+                throw error;
             }
         }
 
@@ -334,6 +417,14 @@
             const file = e.target.files[0];
             if (!file) return;
             
+            // UI check for API key
+            const apiKey = getApiKey();
+            if (!apiKey) {
+                showApiKeyModal();
+                e.target.value = ''; // Reset file input
+                return;
+            }
+
             uploadingDoc = true;
             render();
 
@@ -355,6 +446,8 @@
 
                 const quiz = await generateQuiz(text, file.name);
                 
+                if (!quiz) throw new Error("Quiz generation returned null.");
+
                 const newDoc = {
                     id: Date.now().toString(),
                     title: file.name.replace(/\.(pdf|txt|md)$/i, ''),
@@ -370,9 +463,15 @@
 
             } catch (error) {
                 console.error('Upload process failed:', error);
-                customAlert('Upload Failed', 'There was an error uploading the file or generating the quiz.');
+                if (error.message && error.message.includes('503')) {
+                    customAlert('Service Busy', 'The AI service is currently experiencing high traffic (Error 503). Please wait a minute and try uploading your document again.');
+                } else {
+                    customAlert('Upload Failed', 'Error: ' + error.message);
+                }
             } finally {
                 uploadingDoc = false;
+                const fileInput = document.getElementById('file-upload');
+                if(fileInput) fileInput.value = '';
                 render();
             }
         }
@@ -465,9 +564,7 @@
         function submitAnswer() {
             if (currentQuizState.selectedAnswer === null) return;
             
-            // FIX: Ensure correctIndex is an integer during comparison for safety
             const correctIndex = parseInt(currentQuizState.quiz.questions[currentQuizState.questionIndex].correctIndex);
-            
             const correct = currentQuizState.selectedAnswer === correctIndex;
             
             if (correct) {
@@ -491,24 +588,19 @@
         function completeTraining() {
             const total = currentQuizState.quiz.questions.length;
             const percentage = (currentQuizState.score / total) * 100;
-            
-            // MANDATORY 100% PASSING RULE
             const passed = percentage === 100;
             
             let pointsAwarded = 0;
             if (passed) {
                 pointsAwarded = total * 10;
-                // Only add to completed trainings if it's the first time passing this SOP
                 if (!currentUser.completedTrainings.includes(selectedDoc.id)) {
                      currentUser.completedTrainings.push(selectedDoc.id);
                 }
             }
             
-            // Update points and level
             currentUser.points += pointsAwarded;
             currentUser.level = Math.floor(currentUser.points / 100) + 1;
             
-            // Update badges (simple logic based on number of completions)
             const completedCount = currentUser.completedTrainings.length;
             if (completedCount >= 5 && !currentUser.badges.includes('bronze')) currentUser.badges.push('bronze');
             if (completedCount >= 10 && !currentUser.badges.includes('silver')) currentUser.badges.push('silver');
@@ -537,10 +629,15 @@
             app.innerHTML = `
                 <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
                     <div class="card max-w-md w-full p-8">
-                        <div class="text-center mb-8">
-                            <i data-lucide="brain" class="mx-auto text-indigo-600 mb-4" style="width: 48px; height: 48px;"></i>
-                            <h1 class="text-3xl font-bold text-gray-800">SOP Training Portal</h1>
-                            <p class="text-gray-600 mt-2">Sign in to access training or management tools</p>
+                        <div class="flex justify-between mb-6">
+                            <div class="text-center w-full">
+                                <i data-lucide="brain" class="mx-auto text-indigo-600 mb-4" style="width: 48px; height: 48px;"></i>
+                                <h1 class="text-3xl font-bold text-gray-800">SOP Training Portal</h1>
+                                <p class="text-gray-600 mt-2">Sign in to access training or management tools</p>
+                            </div>
+                            <button onclick="showApiKeyModal()" class="absolute top-6 right-6 text-gray-400 hover:text-indigo-600" title="API Settings">
+                                <i data-lucide="settings" style="width: 24px; height: 24px;"></i>
+                            </button>
                         </div>
                         <div class="space-y-4">
                             <div>
@@ -573,7 +670,6 @@
 
         function renderQuiz() {
             const { quiz, questionIndex, selectedAnswer, showResult, score } = currentQuizState;
-            // DEFENSIVE FIX: Ensure question and its properties are valid objects/arrays
             const rawQuestion = quiz.questions[questionIndex];
             const question = {
                 question: rawQuestion.question || 'Error: Question missing.',
@@ -655,7 +751,6 @@
                 </div>
             `;
             
-            // Add event listeners
             document.getElementById('quiz-options').querySelectorAll('button').forEach(button => {
                 button.addEventListener('click', (e) => {
                     if (!showResult) handleSelectAnswer(parseInt(e.currentTarget.dataset.index));
@@ -676,7 +771,6 @@
             const app = document.getElementById('app');
             let content = '';
 
-            // --- Header ---
             content += `
                 <header class="card p-6 mb-6">
                     <div class="flex justify-between items-center">
@@ -688,6 +782,10 @@
                             <p class="text-gray-600 mt-2">${userRole === 'manager' ? 'Manager Dashboard' : 'Welcome, ' + currentUser.name}</p>
                         </div>
                         <div class="flex items-center gap-4">
+                            <button onclick="showApiKeyModal()" class="flex items-center gap-2 px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 text-gray-600">
+                                <i data-lucide="settings" style="width: 20px; height: 20px;"></i>
+                                Settings
+                            </button>
                             <span class="text-sm font-medium text-gray-700">${currentUser.email}</span>
                             <button id="logout-button" class="flex items-center gap-2 px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">
                                 <i data-lucide="log-out" style="width: 20px; height: 20px;"></i>
@@ -712,7 +810,6 @@
                 </div>
             `;
             
-            // --- Dashboard (Manager) ---
             if (view === 'dashboard' && userRole === 'manager') {
                 const totalAssigned = employees.filter(e => e.email !== 'manager@company.com').reduce((sum, e) => sum + getStats(e).total, 0);
                 const totalCompleted = employees.filter(e => e.email !== 'manager@company.com').reduce((sum, e) => sum + getStats(e).completed, 0);
@@ -745,7 +842,6 @@
                 `;
             }
 
-            // --- Dashboard (Employee) ---
             if (view === 'dashboard' && userRole === 'employee') {
                 const stats = getStats(currentUser);
                 const assignedDocs = documents.filter(doc => (doc.assignedTo || []).includes(currentUser.email));
@@ -803,7 +899,6 @@
                 `;
             }
 
-            // --- SOPs & Assignment (Manager) ---
             if (view === 'documents' && userRole === 'manager') {
                 content += `
                     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -858,7 +953,6 @@
                 `;
             }
 
-            // --- Employees & Scores (Manager) ---
             if (view === 'employees' && userRole === 'manager') {
                 const employeeList = employees.filter(e => e.email !== 'manager@company.com');
                 content += `
@@ -927,7 +1021,6 @@
 
             app.innerHTML = content;
 
-            // Global event listeners (after content is inserted)
             const logoutBtn = document.getElementById('logout-button');
             if (logoutBtn) logoutBtn.addEventListener('click', handleLogout);
             
@@ -938,17 +1031,14 @@
                 });
             });
 
-            // --- Employee View Event Listeners (Must be conditional and after DOM update) ---
             if (view === 'employees' && userRole === 'manager') {
                 const addEmployeeBtn = document.getElementById('add-employee-btn');
 
                 if (!showAddEmployee) {
-                    // Attach listener to the main '+' Add Employee button
                     if (addEmployeeBtn) {
                         addEmployeeBtn.addEventListener('click', () => { showAddEmployee = true; render(); });
                     }
                 } else {
-                    // Attach listeners for the form elements
                     const newEmpNameInput = document.getElementById('new-emp-name');
                     const newEmpEmailInput = document.getElementById('new-emp-email');
                     const submitBtn = document.getElementById('add-employee-submit');
@@ -961,12 +1051,9 @@
                 }
             }
             
-
-            // Re-render Lucide icons
             lucide.createIcons();
         }
 
-        /** Main Render Loop */
         function render() {
             if (quizInProgress) {
                 renderQuiz();
@@ -977,7 +1064,6 @@
             }
         }
 
-        // Initialize App
         window.onload = loadData;
     </script>
 </body>
