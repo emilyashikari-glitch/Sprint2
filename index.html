@@ -1,13 +1,25 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!--
+        SOP Training & Gamification Portal
+        - Tailwind + Lucide for UI
+        - Single-page app rendered entirely via JavaScript
+        - Uses Google Gemini API for:
+          - PDF text extraction
+          - Quiz generation from SOP content
+    -->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOP Training & Gamification Portal</title>
+     <!-- Tailwind CSS CDN for utility-first styling -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide icons for nice inline SVG icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-        /* Custom styles for better aesthetics and readability */
+         /* ============================
+           Global design tokens & layout
+           ============================ */
         :root {
             --primary-color: #4f46e5;
             --primary-light: #eef2ff;
@@ -17,6 +29,8 @@
             background-color: var(--primary-light);
             min-height: 100vh;
         }
+
+        /* Primary button styling shared across the app */
         .btn-primary {
             background-color: var(--primary-color);
             color: white;
@@ -28,12 +42,16 @@
         .btn-primary:hover {
             background-color: #4338ca;
         }
+
+        /* Card container used for panels (login box, dashboard sections, etc.) */
         .card {
             background-color: white;
             border-radius: 12px;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
             padding: 24px;
         }
+
+         /* Quiz option states (base, hover, selected, correct, incorrect) */
         .quiz-option:hover {
             border-color: var(--primary-color);
         }
@@ -49,7 +67,8 @@
             border-color: #ef4444 !important;
             background-color: #fee2e2 !important;
         }
-        /* Style for required 100% score notice */
+
+        /* Banner that reminds users they must score 100% to pass */
         .passing-notice {
             background-color: #fef3c7;
             color: #b45309;
@@ -62,11 +81,12 @@
 </head>
 <body class="p-6">
 
+    <!-- Root app container: JS will render login/dashboard/quiz views into this div -->
     <div id="app" class="max-w-7xl mx-auto">
         <!-- Content will be rendered here by JavaScript -->
     </div>
 
-    <!-- Modal for Alerts/Messages -->
+    <!-- Reusable modal for custom alerts / status messages -->
     <div id="custom-alert" class="fixed inset-0 bg-gray-600 bg-opacity-50 z-50 hidden flex items-center justify-center">
         <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
             <h3 class="text-xl font-bold mb-3" id="alert-title"></h3>
@@ -75,7 +95,7 @@
         </div>
     </div>
 
-    <!-- Modal for API Key Configuration -->
+    <!-- Modal for Google Gemini API Key Configuration -->
     <div id="api-key-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden flex items-center justify-center">
         <div class="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full">
             <h3 class="text-2xl font-bold mb-4 flex items-center gap-2">
@@ -99,18 +119,35 @@
     </div>
 
     <script>
-        // Global variables provided by the Canvas environment (used for persistent storage)
+        // ==========================================================
+        // SOP Training Portal Front-End
+        // - Login (manager / employee)
+        // - Upload SOPs, extract text, generate quizzes via Gemini
+        // - Assign trainings, track completion & gamified points
+        // - Employee quiz-taking experience with 100% required to pass
+        // ==========================================================
+
+        // Global variables provided by the Canvas environment (used for persistent storage).
+        // If not present, we fall back to localStorage so this also works standalone.
         var storage = typeof window.storage !== 'undefined' ? window.storage : {
-            // Fallback for non-Canvas environments (uses localStorage)
             get: (key) => Promise.resolve({ value: localStorage.getItem(key) }),
             set: (key, value) => Promise.resolve(localStorage.setItem(key, value)),
         };
 
         // --- API Key Management ---
+
+        /**
+         * Returns the currently stored Gemini API key from localStorage.
+         * This key is required for all Gemini-based operations (PDF parsing, quiz generation).
+         */
         function getApiKey() {
             return localStorage.getItem('sop_gemini_api_key') || "";
         }
 
+        /**
+         * Save the entered Gemini API key into localStorage and close the modal.
+         * Shows a confirmation via customAlert when successful.
+         */
         function saveApiKey() {
             const input = document.getElementById('api-key-input');
             const key = input.value.trim();
@@ -123,6 +160,9 @@
             }
         }
 
+        /**
+         * Opens the API key modal, pre-filling the input if a key already exists.
+         */
         function showApiKeyModal() {
             const currentKey = getApiKey();
             if (currentKey) {
@@ -134,14 +174,25 @@
         }
 
         // --- State Management ---
-        let isLoggedIn = false;
-        let userRole = null;
-        let currentUser = null;
+        // These variables hold the in-memory state of the app.
+        // They are the single source of truth for what is currently shown in the UI.
+
+        let isLoggedIn = false;  // Has any user successfully logged in?
+        let userRole = null;     // 'manager' or 'employee'
+        let currentUser = null;  // Currently logged-in employee/manager object
+
+        // Login form state
         let loginEmail = '';
         let loginError = '';
+
+        // High-level navigation state: 'dashboard' | 'documents' | 'employees'
         let view = 'dashboard';
-        let documents = [];
-        let employees = [];
+
+        // Core data sets persisted via storage
+        let documents = [];      // List of SOPs with quiz and assignment info
+        let employees = [];      // List of employees (including a special manager account)
+
+        // Quiz runtime state (for currently active quiz session)
         let selectedDoc = null;
         let currentQuizState = {
             docId: null,
@@ -152,11 +203,12 @@
             score: 0
         };
 
-        let uploadingDoc = false;
-        let showAddEmployee = false;
+        // UI helper flags
+        let uploadingDoc = false;      // When true, shows a "processing" state on the upload card
+        let showAddEmployee = false;   // Toggles the "Add Employee" form
         let newEmployeeName = '';
         let newEmployeeEmail = '';
-        let quizInProgress = false;
+        let quizInProgress = false;    // Used to push quiz view on top of dashboard
 
         // --- Utility Functions ---
 
@@ -175,6 +227,7 @@
             } catch (error) {
                 console.error('Save error:', error);
             }
+            // After saving, re-render to ensure UI reflects the latest state
             render();
         }
 
@@ -192,14 +245,20 @@
             } catch (error) {
                 console.log('No saved data or storage unavailable. Starting fresh.');
             }
-            // Add a default manager if needed
+            // Add a default manager if needed so there's always a way in.
             if (!employees.find(e => e.email === 'manager@company.com')) {
                 employees.push({ id: 'manager', name: 'SOP Manager', email: 'manager@company.com', points: 0, level: 0, completedTrainings: [], badges: [] });
             }
             render();
         }
 
-        /** Calculate employee stats */
+        /**
+         * Compute completion stats (assigned vs completed trainings) for an employee.
+         * Returns:
+         *  - completion: percentage (0–100)
+         *  - completed: number of trainings completed
+         *  - total: number of trainings assigned
+         */
         function getStats(emp) {
             const assignedTrainings = documents.filter(doc => (doc.assignedTo || []).includes(emp.email));
             const completed = emp.completedTrainings.length;
@@ -214,7 +273,12 @@
 
         // --- API & Quiz Generation ---
 
-        /** Calls the Gemini API to generate a quiz from document content */
+        /**
+         * Calls the Gemini API to generate a quiz from SOP document content.
+         * - Trims content for token efficiency
+         * - Asks Gemini to return a strict JSON array of questions
+         * - Validates and normalizes the result before returning
+         */
         async function generateQuiz(content, title) {
             const apiKey = getApiKey();
             if (!apiKey) {
@@ -232,7 +296,7 @@
 
             const userQuery = `SOP Title: ${title}\nSOP Content: ${promptContent}\n\nGenerate 5 quiz questions.`;
 
-            // FIX: Changed 'config' to 'generationConfig' to match API requirements
+            // 'generationConfig' to match API requirements
             const payload = {
                 contents: [{ parts: [{ text: userQuery }] }],
                 systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -271,8 +335,8 @@
                     throw new Error("Invalid API response structure.");
                 }
 
+                // Gemini sometimes wraps JSON in ```json fences; strip those if present
                 let jsonText = data.candidates[0].content.parts[0].text.trim();
-                
                 if (jsonText.startsWith('```')) {
                     jsonText = jsonText.replace(/^```json\s*|```\s*$/g, '');
                 }
@@ -285,6 +349,7 @@
                     throw new Error("Failed to parse quiz JSON.");
                 }
                 
+                // Basic validation to ensure each question is usable
                 const validatedQuestions = [];
 
                 if (!Array.isArray(quizArray)) {
@@ -325,7 +390,10 @@
             }
         }
 
-        /** Extracts text from PDF using the Gemini API */
+         /**
+         * Extracts text from a PDF using Gemini.
+         * Sends the PDF as inlineData and asks Gemini to return a "clean" text block.
+         */
         async function extractTextFromPDF(base64Data, title) {
             const apiKey = getApiKey();
             if (!apiKey) return null;
@@ -382,6 +450,13 @@
 
         // --- Manager Actions ---
 
+        /**
+         * Handle login attempt:
+         * - manager@company.com => manager dashboard
+         * - existing employee email => employee dashboard
+         * - First-time unknown emails are rejected (manager must create employees).
+         */
+
         function handleLogin() {
             loginError = '';
             const email = loginEmail.trim().toLowerCase();
@@ -404,6 +479,7 @@
             render();
         }
 
+        /** Reset state and return to the login screen. */
         function handleLogout() {
             isLoggedIn = false;
             userRole = null;
@@ -413,6 +489,13 @@
             render();
         }
 
+        /**
+         * File upload handler for SOPs.
+         * - Enforces presence of API key
+         * - Extracts text (PDF or text file)
+         * - Calls generateQuiz
+         * - Saves the new document into storage
+         */
         async function handleFileUpload(e) {
             const file = e.target.files[0];
             if (!file) return;
@@ -430,6 +513,7 @@
 
             let text = '';
             try {
+                // For PDFs, use Gemini to do text extraction; otherwise, read text directly
                 if (file.type === 'application/pdf') {
                     const base64 = await new Promise((resolve, reject) => {
                         const reader = new FileReader();
@@ -448,13 +532,14 @@
                 
                 if (!quiz) throw new Error("Quiz generation returned null.");
 
+                // Build new document record
                 const newDoc = {
                     id: Date.now().toString(),
                     title: file.name.replace(/\.(pdf|txt|md)$/i, ''),
                     content: text,
                     uploadDate: new Date().toISOString(),
                     quiz: quiz,
-                    assignedTo: [], // Manager must assign it
+                    assignedTo: [], // Manager must assign it explicitly
                 };
 
                 documents = [...documents, newDoc];
@@ -476,6 +561,10 @@
             }
         }
 
+         /**
+         * Create a new employee record (manager only).
+         * Simple validation on name and email, plus duplicate check.
+         */
         function addEmployee() {
             const name = newEmployeeName.trim();
             const email = newEmployeeEmail.trim().toLowerCase();
@@ -510,6 +599,11 @@
             render();
         }
 
+        /**
+         * Toggle assignment of a given SOP document to an employee.
+         * - Manager cannot assign training to themselves.
+         * - Clicking again removes the assignment (acts as a toggle).
+         */
         function assignTraining(docId, employeeEmail) {
             const doc = documents.find(d => d.id === docId);
             if (!doc) return;
@@ -535,6 +629,10 @@
 
         // --- Employee / Quiz Actions ---
 
+        /**
+         * Kick off a quiz session for a selected SOP.
+         * Validates that the quiz exists and then switches the view into quiz mode.
+         */
         function startQuiz(docId) {
             const doc = documents.find(d => d.id === docId);
             if (!doc || !doc.quiz || doc.quiz.questions.length === 0) {
@@ -554,6 +652,9 @@
             render();
         }
 
+        /**
+         * Record the currently selected answer index for the active question.
+         */
         function handleSelectAnswer(index) {
             if (!currentQuizState.showResult) {
                 currentQuizState.selectedAnswer = index;
@@ -561,6 +662,9 @@
             }
         }
 
+        /**
+         * Evaluate the chosen answer, update score if correct, and reveal result styling.
+         */
         function submitAnswer() {
             if (currentQuizState.selectedAnswer === null) return;
             
@@ -574,6 +678,9 @@
             render();
         }
 
+        /**
+         * Move to the next question, or complete the training if this was the last question.
+         */
         function nextQuestion() {
             if (currentQuizState.questionIndex < currentQuizState.quiz.questions.length - 1) {
                 currentQuizState.questionIndex += 1;
@@ -585,6 +692,12 @@
             }
         }
 
+        /**
+         * Finalize a quiz session:
+         * - Check if 100% was achieved
+         * - Award points and adjust level/badges if passed
+         * - Persist the updated employee data
+         */
         function completeTraining() {
             const total = currentQuizState.quiz.questions.length;
             const percentage = (currentQuizState.score / total) * 100;
@@ -624,6 +737,10 @@
 
         // --- Rendering Functions ---
 
+        /**
+         * Render the login page (email-only login).
+         * Manager and employees use the same form; behavior is based on email.
+         */
         function renderLogin() {
             const app = document.getElementById('app');
             app.innerHTML = `
@@ -668,6 +785,9 @@
             lucide.createIcons();
         }
 
+        /**
+         * Render the active quiz view on top of the rest of the application.
+         */
         function renderQuiz() {
             const { quiz, questionIndex, selectedAnswer, showResult, score } = currentQuizState;
             const rawQuestion = quiz.questions[questionIndex];
@@ -767,10 +887,15 @@
             lucide.createIcons();
         }
 
+        /**
+         * Render the main app shell for a logged-in user.
+         * Chooses which dashboard sub-view to show based on `view` and `userRole`.
+         */
         function renderMainApp() {
             const app = document.getElementById('app');
             let content = '';
 
+            // Top header + navigation tabs
             content += `
                 <header class="card p-6 mb-6">
                     <div class="flex justify-between items-center">
@@ -810,6 +935,7 @@
                 </div>
             `;
             
+            // Manager dashboard summary tiles
             if (view === 'dashboard' && userRole === 'manager') {
                 const totalAssigned = employees.filter(e => e.email !== 'manager@company.com').reduce((sum, e) => sum + getStats(e).total, 0);
                 const totalCompleted = employees.filter(e => e.email !== 'manager@company.com').reduce((sum, e) => sum + getStats(e).completed, 0);
@@ -842,6 +968,7 @@
                 `;
             }
 
+            // Employee dashboard view (stats + assigned trainings)
             if (view === 'dashboard' && userRole === 'employee') {
                 const stats = getStats(currentUser);
                 const assignedDocs = documents.filter(doc => (doc.assignedTo || []).includes(currentUser.email));
@@ -899,6 +1026,7 @@
                 `;
             }
 
+            // Documents & Assignment (manager only)
             if (view === 'documents' && userRole === 'manager') {
                 content += `
                     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -953,6 +1081,7 @@
                 `;
             }
 
+            // Employees & Scores leaderboard (manager only)
             if (view === 'employees' && userRole === 'manager') {
                 const employeeList = employees.filter(e => e.email !== 'manager@company.com');
                 content += `
@@ -1021,6 +1150,7 @@
 
             app.innerHTML = content;
 
+            // Wire up global buttons/links in the rendered view
             const logoutBtn = document.getElementById('logout-button');
             if (logoutBtn) logoutBtn.addEventListener('click', handleLogout);
             
@@ -1031,6 +1161,7 @@
                 });
             });
 
+            // Add-employee inline form bindings (manager / employees view)
             if (view === 'employees' && userRole === 'manager') {
                 const addEmployeeBtn = document.getElementById('add-employee-btn');
 
@@ -1054,6 +1185,12 @@
             lucide.createIcons();
         }
 
+        /**
+         * Top-level render router:
+         * - If a quiz is active, show quiz
+         * - Else if logged in, show the main app
+         * - Else show login screen
+         */
         function render() {
             if (quizInProgress) {
                 renderQuiz();
@@ -1064,6 +1201,7 @@
             }
         }
 
+        // Initialize the app by loading stored data and rendering the appropriate view.
         window.onload = loadData;
     </script>
 </body>
